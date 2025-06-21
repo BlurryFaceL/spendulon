@@ -1,0 +1,11 @@
+{
+  "name": "spendulon-scripts",
+  "version": "1.0.0",
+  "description": "Migration and utility scripts for Spendulon",
+  "scripts": {
+    "migrate-users": "node migrate-users.js"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1691.0"
+  }
+}
