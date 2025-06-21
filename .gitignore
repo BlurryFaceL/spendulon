@@ -26,11 +26,12 @@ dist/
 # AWS credentials and config
 .aws/
 awsconfig.json
-aws-infra/parameters.*.json
-aws-infra/parameters.json
 
 # SAM build artifacts
 .aws-sam/
+
+# AWS parameter files with real secrets
+aws-infra/parameters.real.json
 
 # Python
 __pycache__/
@@ -101,3 +102,6 @@ package-lock.json.orig
 
 # HTML files for favicon creation
 create-favicon.html
+
+aws-infra/src/handlers/ml/Dockerfile.onnx
+aws-infra/src/handlers/ml/deploy-onnx-lambda.sh
