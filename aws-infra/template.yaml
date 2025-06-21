@@ -1,0 +1,1110 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Spendulon - Financial Tracking Application
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+  GoogleClientId:
+    Type: String
+    NoEcho: true
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+  DomainName:
+    Type: String
+    Default: spendulon.com
+    Description: The custom domain name for the application
+  CreateRoute53HostedZone:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Whether to create a Route 53 hosted zone (set to true if you want AWS to manage DNS)
+  SSLCertificateArn:
+    Type: String
+    Default: !Sub 'arn:aws:acm:us-east-1:${AWS::AccountId}:certificate/REPLACE-WITH-YOUR-CERT-ID'
+    Description: ARN of the SSL certificate in us-east-1 for CloudFront (create manually in ACM)
+
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 30
+    MemorySize: 128
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        ALLOWED_ORIGIN: !Sub 'https://${DomainName}'
+
+Conditions:
+  CreateRoute53Resources: !Equals [!Ref CreateRoute53HostedZone, 'true']
+
+Resources:
+  # SSL Certificate is created manually in us-east-1, referenced by parameter
+
+  # Route 53 Hosted Zone (optional)
+  Route53HostedZone:
+    Type: AWS::Route53::HostedZone
+    Condition: CreateRoute53Resources
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub 'Hosted zone for ${DomainName}'
+
+  # Route 53 Records (if hosted zone is created)
+  Route53RecordSetApex:
+    Type: AWS::Route53::RecordSet
+    Condition: CreateRoute53Resources
+    Properties:
+      HostedZoneId: !Ref Route53HostedZone
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2 # CloudFront hosted zone ID (constant)
+        EvaluateTargetHealth: false
+
+  Route53RecordSetWWW:
+    Type: AWS::Route53::RecordSet
+    Condition: CreateRoute53Resources
+    Properties:
+      HostedZoneId: !Ref Route53HostedZone
+      Name: !Sub 'www.${DomainName}'
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2 # CloudFront hosted zone ID (constant)
+        EvaluateTargetHealth: false
+  # Frontend hosting bucket
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub spendulon-frontend-${Environment}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+
+  # ML Processing Bucket for PDF uploads
+  MLProcessingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub spendulon-ml-processing-${Environment}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - "https://spendulon.com"
+            AllowedMethods:
+              - PUT
+              - POST
+            AllowedHeaders:
+              - "*"
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldUploads
+            Status: Enabled
+            ExpirationInDays: 7  # Delete files after 7 days
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  # CloudFront Origin Access Identity
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub 'OAI for ${WebsiteBucket}'
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn:
+      - WebsiteBucket
+      - CloudFrontOriginAccessIdentity
+    Properties:
+      DistributionConfig:
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}'
+        Enabled: true
+        DefaultRootObject: index.html
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          TargetOriginId: S3Origin
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          AcmCertificateArn: !Ref SSLCertificateArn
+          MinimumProtocolVersion: TLSv1.2_2021
+          SslSupportMethod: sni-only
+        Aliases:
+          - !Ref DomainName
+          - !Sub 'www.${DomainName}'
+
+  # Update bucket policy for CloudFront
+  WebsiteBucketPolicyUpdate:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${CloudFrontOriginAccessIdentity}'
+            Action: 's3:GetObject'
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub spendulon-users-${Environment}
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+
+  # Add Google as Identity Provider
+  GoogleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties:
+      UserPoolId: !Ref UserPool
+      ProviderName: Google
+      ProviderType: Google
+      ProviderDetails:
+        client_id: !Ref GoogleClientId
+        client_secret: !Ref GoogleClientSecret
+        authorize_scopes: "profile email openid"
+      AttributeMapping:
+        email: email
+        name: name
+        picture: picture
+        username: sub
+
+  # Add Domain for Hosted UI
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub "spendulon-auth-${Environment}-${AWS::AccountId}"
+      UserPoolId: !Ref UserPool
+  
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: GoogleIdentityProvider
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub spendulon-client-${Environment}
+      GenerateSecret: false
+      SupportedIdentityProviders:
+        - Google
+      CallbackURLs:
+        - http://localhost:3000/dashboard
+        - !Sub https://${DomainName}/dashboard
+        - !Sub https://www.${DomainName}/dashboard
+      LogoutURLs:
+        - http://localhost:3000/
+        - !Sub https://${DomainName}/
+        - !Sub https://www.${DomainName}/
+      AllowedOAuthFlows:
+        - code
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      PreventUserExistenceErrors: ENABLED
+      AllowedOAuthFlowsUserPoolClient: true
+      AuthSessionValidity: 15
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+  # DynamoDB Tables
+  WalletsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub spendulon-wallets-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: walletId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: walletId
+          KeyType: RANGE
+
+  TransactionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub spendulon-transactions-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: walletId
+          AttributeType: S
+        - AttributeName: transactionId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: walletId
+          KeyType: HASH
+        - AttributeName: transactionId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: WalletDateIndex
+          KeySchema:
+            - AttributeName: walletId
+              KeyType: HASH
+            - AttributeName: date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: UserIdIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: transactionId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  UserCategoriesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub spendulon-user-categories-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: categoryId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: categoryId
+          KeyType: RANGE
+
+  UserSettingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub spendulon-user-settings-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub spendulon-users-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+
+  UserBudgetsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub spendulon-user-budgets-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: budgetId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: budgetId
+          KeyType: RANGE
+
+  MLFeedbackTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub spendulon-ml-feedback-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: feedbackId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: walletId_descriptionPrefix
+          AttributeType: S
+      KeySchema:
+        - AttributeName: feedbackId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserWalletIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: walletId_descriptionPrefix
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+
+  # API Gateway
+  SpendulonApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Environment
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+      Cors:
+        AllowOrigin: "'*'"
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+        AllowCredentials: false
+
+  # Lambda Functions
+  GetWalletsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: wallets/getWallets.handler
+      Runtime: nodejs18.x
+      Description: Get all wallets for a user
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WalletsTable
+      Environment:
+        Variables:
+          WALLETS_TABLE: !Ref WalletsTable
+      Events:
+        GetWallets:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SpendulonApi
+            Path: /wallets
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  CreateWalletFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: wallets/createWallet.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          WALLETS_TABLE: !Ref WalletsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /wallets
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  GetTransactionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: transactions/getTransactions.handler
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          WALLETS_TABLE: !Ref WalletsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref WalletsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /wallets/{walletId}/transactions
+            Method: get
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  CreateTransactionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: transactions/createTransaction.handler
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          WALLETS_TABLE: !Ref WalletsTable
+          USER_CATEGORIES_TABLE: !Ref UserCategoriesTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UserCategoriesTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /wallets/{walletId}/transactions
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  CreateTransactionsBatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: transactions/createTransactionsBatch.handler
+      Timeout: 60  # Increase timeout for batch operations
+      MemorySize: 512  # Increase memory for batch processing
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          WALLETS_TABLE: !Ref WalletsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /wallets/{walletId}/transactions/batch
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # New wallet CRUD functions
+  UpdateWalletFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: wallets/updateWallet.handler
+      Environment:
+        Variables:
+          WALLETS_TABLE: !Ref WalletsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /wallets/{walletId}
+            Method: put
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  DeleteWalletFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: wallets/deleteWallet.handler
+      Environment:
+        Variables:
+          WALLETS_TABLE: !Ref WalletsTable
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /wallets/{walletId}
+            Method: delete
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # New transaction CRUD functions
+  UpdateTransactionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: transactions/updateTransaction.handler
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          WALLETS_TABLE: !Ref WalletsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /wallets/{walletId}/transactions/{transactionId}
+            Method: put
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  DeleteTransactionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: transactions/deleteTransaction.handler
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          WALLETS_TABLE: !Ref WalletsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /wallets/{walletId}/transactions/{transactionId}
+            Method: delete
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # User Categories Functions
+  GetUserCategoriesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: categories/getUserCategories.handler
+      Environment:
+        Variables:
+          USER_CATEGORIES_TABLE: !Ref UserCategoriesTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UserCategoriesTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/categories
+            Method: get
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  CreateUserCategoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: categories/createUserCategory.handler
+      Environment:
+        Variables:
+          USER_CATEGORIES_TABLE: !Ref UserCategoriesTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserCategoriesTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/categories
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  UpdateUserCategoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: categories/updateUserCategory.handler
+      Environment:
+        Variables:
+          USER_CATEGORIES_TABLE: !Ref UserCategoriesTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserCategoriesTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/categories/{categoryId}
+            Method: put
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  DeleteUserCategoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: categories/deleteUserCategory.handler
+      Environment:
+        Variables:
+          USER_CATEGORIES_TABLE: !Ref UserCategoriesTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserCategoriesTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/categories/{categoryId}
+            Method: delete
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  BulkCreateUserCategoriesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: categories/bulkCreateUserCategories.handler
+      Environment:
+        Variables:
+          USER_CATEGORIES_TABLE: !Ref UserCategoriesTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserCategoriesTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/categories/bulk
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # User Functions
+  CreateOrUpdateUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: users/createOrUpdateUser.handler
+      Environment:
+        Variables:
+          USERS_TABLE: !Ref UsersTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # User Settings Functions
+  GetUserSettingsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: settings/getUserSettings.handler
+      Environment:
+        Variables:
+          USER_SETTINGS_TABLE: !Ref UserSettingsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UserSettingsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/settings
+            Method: get
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  UpdateUserSettingsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: settings/updateUserSettings.handler
+      Environment:
+        Variables:
+          USER_SETTINGS_TABLE: !Ref UserSettingsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserSettingsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/settings
+            Method: put
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # User Budgets Functions
+  GetUserBudgetsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: budgets/getUserBudgets.handler
+      Environment:
+        Variables:
+          USER_BUDGETS_TABLE: !Ref UserBudgetsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UserBudgetsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/budgets
+            Method: get
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  CreateUserBudgetFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: budgets/createUserBudget.handler
+      Environment:
+        Variables:
+          USER_BUDGETS_TABLE: !Ref UserBudgetsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserBudgetsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/budgets
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  UpdateUserBudgetFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: budgets/updateUserBudget.handler
+      Environment:
+        Variables:
+          USER_BUDGETS_TABLE: !Ref UserBudgetsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserBudgetsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/budgets/{budgetId}
+            Method: put
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  DeleteUserBudgetFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: budgets/deleteUserBudget.handler
+      Environment:
+        Variables:
+          USER_BUDGETS_TABLE: !Ref UserBudgetsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserBudgetsTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /users/budgets/{budgetId}
+            Method: delete
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # Recurring Transactions Function
+  ProcessRecurringTransactionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: recurring/processRecurringTransactions.handler
+      Runtime: nodejs18.x
+      Timeout: 300
+      MemorySize: 256
+      Description: Process recurring transactions daily
+      Environment:
+        Variables:
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          WALLETS_TABLE: !Ref WalletsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 9 * * ? *)  # Run daily at 9 AM UTC
+            Description: Process recurring transactions daily
+            Enabled: true
+
+  # ML Feedback Function (Only Lambda needed for import feature)
+  StoreMlFeedbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: ml/storeFeedback.handler
+      Description: Store ML feedback for training
+      Environment:
+        Variables:
+          ML_FEEDBACK_TABLE: !Ref MLFeedbackTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MLFeedbackTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /ml/feedback
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # Query ML Feedback Function for pattern-based suggestions
+  QueryMlFeedbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers
+      Handler: ml/queryFeedback.handler
+      Description: Query ML feedback for pattern-based category suggestions
+      Environment:
+        Variables:
+          ML_FEEDBACK_TABLE: !Ref MLFeedbackTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref MLFeedbackTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /ml/feedback/query
+            Method: get
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # Note: The existing ML categorizer Lambda needs environment variable added:
+  # ML_FEEDBACK_TABLE: !Ref MLFeedbackTable
+  # And DynamoDB write permissions to store original ML results
+
+
+  # PDF Upload URL Generator
+  PdfUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers/pdf-upload
+      Handler: getUploadUrl.handler
+      Description: Generate presigned S3 URLs for PDF uploads
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref MLProcessingBucket
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref MLProcessingBucket
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /pdf/upload-url
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # PDF Parser Lambda (ZIP deployment)
+  PdfParserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/handlers/pdf
+      Handler: parseBankStatement.lambda_handler
+      Runtime: python3.9
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ML_PROCESSING_BUCKET: !Ref MLProcessingBucket
+          ML_CATEGORIZER_FUNCTION: spendulon-ml-standalone-v2-MlCategorizerFunction-b6fUazcocDjT
+      Policies:
+        - S3FullAccessPolicy:
+            BucketName: !Ref MLProcessingBucket
+        - LambdaInvokePolicy:
+            FunctionName: spendulon-ml-standalone-v2-MlCategorizerFunction-b6fUazcocDjT
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /pdf/parse
+            Method: post
+            RestApiId: !Ref SpendulonApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+
+Outputs:
+  WebsiteURL:
+    Description: URL for the S3 hosted website
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${SpendulonApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+
+  WalletsTableName:
+    Description: DynamoDB Wallets table name
+    Value: !Ref WalletsTable
+
+  TransactionsTableName:
+    Description: DynamoDB Transactions table name
+    Value: !Ref TransactionsTable
+
+  UserCategoriesTableName:
+    Description: DynamoDB User Categories table name
+    Value: !Ref UserCategoriesTable
+
+  UserSettingsTableName:
+    Description: DynamoDB User Settings table name
+    Value: !Ref UserSettingsTable
+
+  UsersTableName:
+    Description: DynamoDB Users table name
+    Value: !Ref UsersTable
+
+  UserBudgetsTableName:
+    Description: DynamoDB User Budgets table name
+    Value: !Ref UserBudgetsTable
+
+  MLFeedbackTableName:
+    Description: DynamoDB ML Feedback table name
+    Value: !Ref MLFeedbackTable
+    Export:
+      Name: !Sub '${AWS::StackName}-MLFeedbackTableName'
+
+  ApiGatewayId:
+    Description: API Gateway ID
+    Value: !Ref SpendulonApi
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiGatewayId'
+
+  CloudFrontURL:
+    Description: CloudFront Distribution URL
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+    
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref CloudFrontDistribution
+
+  CognitoDomain:
+    Description: Cognito Hosted UI Domain
+    Value: !Sub https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com
+
+  CustomDomainURL:
+    Description: Custom Domain URL
+    Value: !Sub 'https://${DomainName}'
+    
+  SSLCertificateArn:
+    Description: SSL Certificate ARN (manually created)
+    Value: !Ref SSLCertificateArn
+    
+  Route53HostedZoneId:
+    Condition: CreateRoute53Resources
+    Description: Route 53 Hosted Zone ID (if created)
+    Value: !Ref Route53HostedZone
+    
+  Route53NameServers:
+    Condition: CreateRoute53Resources
+    Description: Route 53 Name Servers (if created) - Use these in GoDaddy
+    Value: !Join [', ', !GetAtt Route53HostedZone.NameServers]
+    
+  MLProcessingBucketName:
+    Description: ML Processing S3 Bucket Name
+    Value: !Ref MLProcessingBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-MLProcessingBucket'

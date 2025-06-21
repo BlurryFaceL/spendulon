@@ -1,0 +1,16 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "spendulon-dev"
+resolve_s3 = true
+s3_prefix = "spendulon-dev"
+region = "eu-west-2"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=\"dev\""
+parameter_file = "parameters.real.json"
+resolve_image_repos = true
+
+[default.sync.parameters]
+stack_name = "spendulon-dev"
+region = "eu-west-2"

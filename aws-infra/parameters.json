@@ -1,0 +1,22 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "GoogleClientId", 
+    "ParameterValue": "YOUR_GOOGLE_CLIENT_ID"
+  },
+  {
+    "ParameterKey": "GoogleClientSecret",
+    "ParameterValue": "YOUR_GOOGLE_CLIENT_SECRET"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "spendulon.com"
+  },
+  {
+    "ParameterKey": "SSLCertificateArn",
+    "ParameterValue": "arn:aws:acm:us-east-1:YOUR_ACCOUNT_ID:certificate/YOUR_CERT_ID"
+  }
+]
