@@ -1,0 +1,2 @@
+pdfplumber==0.7.6
+cryptography==41.0.7
