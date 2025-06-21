@@ -105,3 +105,6 @@ create-favicon.html
 
 aws-infra/src/handlers/ml/Dockerfile.onnx
 aws-infra/src/handlers/ml/deploy-onnx-lambda.sh
+
+.serena
+CLAUDE.md
