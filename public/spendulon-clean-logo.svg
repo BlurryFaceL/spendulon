@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <defs>
+    <linearGradient id="cleanGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3730a3;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Modern circular background -->
+  <circle cx="20" cy="20" r="18" fill="url(#cleanGradient)" stroke="#1e1b4b" stroke-width="1"/>
+  
+  <!-- Clean, minimal dollar sign -->
+  <g fill="white">
+    <!-- Central vertical line -->
+    <rect x="19" y="8" width="2" height="24" rx="1"/>
+    
+    <!-- Top horizontal bar -->
+    <rect x="12" y="13" width="16" height="2" rx="1"/>
+    
+    <!-- Middle horizontal bar -->
+    <rect x="12" y="19" width="16" height="2" rx="1"/>
+    
+    <!-- Bottom horizontal bar -->
+    <rect x="12" y="25" width="16" height="2" rx="1"/>
+    
+    <!-- Left connecting curve -->
+    <path d="M 12 15 Q 10 15 10 17 Q 10 19 12 19" fill="white"/>
+    
+    <!-- Right connecting curve -->
+    <path d="M 28 21 Q 30 21 30 23 Q 30 25 28 25" fill="white"/>
+  </g>
+</svg>

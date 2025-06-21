@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#1e40af"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Background with rounded corners -->
+  <rect x="0" y="0" width="32" height="32" rx="6" ry="6" fill="url(#bg)"/>
+  
+  <!-- Dollar sign -->
+  <g fill="white">
+    <!-- Vertical line -->
+    <rect x="14.5" y="4" width="3" height="24" rx="1.5"/>
+    
+    <!-- S shape - top curve -->
+    <path d="M 8 12 Q 8 8 12 8 L 20 8 Q 24 8 24 12 Q 24 16 20 16 L 12 16"/>
+    
+    <!-- S shape - bottom curve -->
+    <path d="M 20 16 Q 24 16 24 20 Q 24 24 20 24 L 12 24 Q 8 24 8 20 Q 8 16 12 16"/>
+  </g>
+</svg>
